@@ -1,0 +1,953 @@
+// 🟧🟧🟧🟧🟧 Class Selection
+async function selectClass(actor) {
+
+    // Collect all possible class sources (compendiums + world items)
+    const compendiumPacks = [
+        "fvtt_mosh_1e_psg.items_classes_1e",
+        ...game.packs.filter(p => p.metadata.type === "Item" && p.metadata.label.toLowerCase().includes("class")).map(p => p.metadata.id)
+    ];
+    const worldClasses = game.items.filter(cls => cls.type === "class");
+
+    // Use a Map to avoid duplicates by class name
+    const classMap = new Map();
+
+    // Load from compendiums
+    for (const packId of compendiumPacks) {
+        const pack = game.packs.get(packId);
+        if (!pack) continue;
+        const classes = await pack.getDocuments();
+        for (const cls of classes) {
+            if (!classMap.has(cls.name)) {
+                classMap.set(cls.name, foundry.utils.deepClone(cls));
+            }
+        }
+    }
+
+    // Add world-level classes, prioritizing them over compendium classes
+    for (const cls of worldClasses) {
+        classMap.set(cls.name, foundry.utils.deepClone(cls));
+    }
+
+    // Sort classes alphabetically
+    const sortedClasses = Array.from(classMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+
+    // Fix the dialog width
+    const classCount = sortedClasses.length;
+    const dialogWidth = Math.min(
+        (classCount <= 5 ? classCount : Math.min(Math.ceil(classCount / 2), 5)) * 276,
+        1600
+    );
+
+    // Introduce StripHMTL function
+    const stripHtml = (html) => html.replace(/<[^>]*>/g, '').trim();
+    const formatAttribute = (value, label) => {
+        if (!Number.isFinite(value) || value === 0) return null;
+        const prefix = value > 0 ? '+' : '';
+        const formattedValue = (Math.abs(value) < 10 ? prefix + "\u00A0" + value : prefix + value);
+        return `${formattedValue}  ${label}`;
+    };
+
+    // build the dialogue content / the CSS stuff
+    let content = `
+    <style>
+        .class-grid-container {
+            display: grid;
+            gap: 20px;
+            padding: 16px;
+            border-radius: 8px;
+            overflow-y: auto;
+            max-height: 80vh;
+            width: 100%;
+            max-width: 1600px;
+            margin: 0 auto;
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        }
+        .class-card {
+            border: 2px solid #333;
+            border-radius: 8px;
+            background: #1a1a1a;
+            color: #ccc;
+            cursor: pointer;
+            transition: border 0.2s, background 0.2s;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            width: 240px;
+            padding: 1em;
+            gap: 0.75em;
+            box-sizing: border-box;
+        }
+        .class-card:hover,
+        .class-card.selected {
+            border-color: #f50;
+            background: #2f1f18;
+        }
+        .class-card img {
+            width: 100%;
+            aspect-ratio: 1 / 1;
+            object-fit: cover;
+            border-radius: 4px;
+        }
+        .class-card h3 {
+            margin: 0.5em 0 0.5em;
+        }
+        .attributes-container {
+            font-family: monospace;
+            text-align: left;
+            padding: 0 0.5em;
+            min-height: 5.5em;
+            max-height: 5.5em;
+            overflow: hidden;
+            line-height: 1.3em;
+            color: #aaa;
+        }
+        .description {
+            padding: 0.5em 0.5em 0.75em;
+            flex-grow: 1;
+            color: #aaa;
+            line-height: 1.3em;
+        }
+        .trauma-response {
+            padding: 0.15em 0.4em;
+            color: #aaa;
+            line-height: 1.2em;
+            font-style: italic;
+            font-size: 0.9em;
+            min-height: 3.6em;
+            max-height: 3.6em;
+            overflow: hidden;
+        }
+    </style>
+    <div class="class-grid-container">
+    `;
+
+    // Put the class boxes together
+    for (const cls of sortedClasses) {
+        const description = stripHtml(cls.system.description || "No description available.");
+        const traumaResponse = stripHtml(cls.system.trauma_response || "No trauma specified.");
+        const baseAdjustment = cls.system.base_adjustment || {};
+        const selectedAdjustment = cls.system.selected_adjustment || {};
+
+        // Gather stats and saves
+        const stats = ['strength', 'speed', 'intellect', 'combat'];
+        const saves = ['sanity', 'fear', 'body'];
+        let attributes = [];
+
+        // Process base adjustments for stats and saves
+        for (const group of [stats, saves]) {
+            const values = group.map(stat => baseAdjustment[stat] || 0);
+            const allEqual = values.every(v => v === values[0]);
+            if (allEqual && values[0] !== 0) {
+                const label = group === stats ? "All Stats" : "All Saves";
+                attributes.push(formatAttribute(values[0], label));
+            } else {
+                group.forEach(stat => {
+                    const value = baseAdjustment[stat] || 0;
+                    const formatted = formatAttribute(value, stat.charAt(0).toUpperCase() + stat.slice(1));
+                    if (formatted) attributes.push(formatted);
+                });
+            }
+        }
+
+        // Add wounds if present
+        const wounds = (baseAdjustment.max_wounds || 0) + (selectedAdjustment.max_wounds || 0);
+        const formattedWounds = formatAttribute(wounds, "Wounds");
+        if (formattedWounds) attributes.push(formattedWounds);
+
+        // Add attribute choices
+        if (Array.isArray(selectedAdjustment.choose_stat)) {
+            selectedAdjustment.choose_stat.forEach(choice => {
+                const isAllStats = stats.every(stat => choice.stats.includes(stat));
+                const isAllSaves = saves.every(save => choice.stats.includes(save));
+                const label = isAllStats ? "Any Stat" : isAllSaves ? "Any Save" : choice.stats.map(stat => stat.charAt(0).toUpperCase() + stat.slice(1)).join(', ');
+                const mod = parseInt(choice.modification, 10) || 0;
+                const formattedChoice = formatAttribute(mod, `Choose 1: ${label}`);
+                if (formattedChoice) attributes.push(formattedChoice);
+            });
+        }
+
+        // Actual class box HTML
+        content += `
+        <div class="class-card" data-class="${cls.id}">
+            <img src="${cls.img || 'icons/svg/mystery-man.svg'}" alt="${cls.name}">
+            <h3>${cls.name}</h3>
+            <div class="attributes-container">
+                ${attributes.join('<br>') || "No attributes."}
+            </div>
+            <p class="trauma-response">${traumaResponse}</p>
+            <p class="description">${description}</p>
+        </div>
+        `;
+    }
+
+    // finish the container
+    content += `</div>`;
+
+    // Dialog and return
+    return new Promise(resolve => {
+        const dlg = new Dialog({
+            title: "Select Your Class",
+            content,
+            buttons: {},
+            close: () => resolve(null),
+            render: (html) => {
+                const dialogElement = html.closest('.app');
+                dialogElement.css({ width: `${dialogWidth}px`, maxWidth: '95vw', margin: '0 auto' });
+                html.find('.class-card').on('click', async function () {
+                    const classId = $(this).data('class');
+                    const selectedClass = sortedClasses.find(cls => cls.id === classId);
+
+                    // Resolve the full class UUID
+                    const fullUUID = selectedClass.pack
+                        ? `Compendium.${selectedClass.pack}.${selectedClass.id}`
+                        : selectedClass.uuid;
+
+                    const base = selectedClass.system.base_adjustment || {};
+                
+                    // Prepare stat/save updates
+                    const stats = ['strength', 'speed', 'intellect', 'combat', 'sanity', 'fear', 'body'];
+                    const updates = {};
+
+                    for (const stat of stats) {
+                        const mod = base[stat] || 0;
+                        if (mod !== 0) {
+                            const current = getProperty(actor, `system.stats.${stat}.value`) || 0;
+                            updates[`system.stats.${stat}.value`] = current + mod;
+                        }
+                    }
+
+                    // Handle max wounds separately
+                    if (typeof base.max_wounds === 'number') {
+                        const currentWounds = getProperty(actor, 'system.hits.max') || 0;
+                        updates['system.hits.max'] = currentWounds + base.max_wounds;
+                    }
+
+                    // Set class name, UUID, and trauma response
+                    updates['system.class.value'] = selectedClass.name;
+                    updates['system.class.uuid'] = fullUUID;
+                    updates['system.other.stressdesc.value'] = selectedClass.system.trauma_response || "";
+
+                    // Apply updates
+                    await actor.update(updates);
+
+                    // Resolve and close
+                    resolve(fullUUID);
+                    dlg.close();
+                });
+
+            }
+        });
+    
+        dlg.render(true);
+    });
+
+}
+
+// 🟦🟦🟦🟦🟦 Attribute Picker
+async function attributeChoice(actor, value, validAttributes) {
+
+    // Calculate dialog width based on the number of attributes
+    const dialogWidth = Math.min(
+        (validAttributes.length <= 5 ? validAttributes.length : Math.min(Math.ceil(validAttributes.length / 2), 5)) * 276,
+        1600
+    );
+    
+    //Enforce Prefix to display
+    const prefix = value > 0 ? '+' : '';
+    const formattedValue = prefix + value;
+    
+    // Generate the attribute boxes
+    const content = `
+    <style>
+        .attribute-grid-container {
+            display: grid;
+            gap: 20px;
+            padding: 16px;
+            border-radius: 8px;
+            overflow-y: auto;
+            max-height: 80vh;
+            width: 100%;
+            max-width: 1600px;
+            margin: 0 auto;
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        }
+        .attribute-card {
+            border: 2px solid #333;
+            border-radius: 8px;
+            background: #1a1a1a;
+            color: #ccc;
+            cursor: pointer;
+            transition: border 0.2s, background 0.2s;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            width: 240px;
+            padding: 1em;
+            gap: 0.75em;
+            box-sizing: border-box;
+        }
+        .attribute-card:hover,
+        .attribute-card.selected {
+            border-color: #ff5500;
+            background: #2f1f18;
+        }
+        .attribute-card img {
+            width: 100%;
+            aspect-ratio: 1 / 1;
+            object-fit: cover;
+            border-radius: 4px;
+        }
+        .attribute-card h3 {
+            margin: 0.5em 0 0.5em;
+        }
+    </style>
+    <div class="attribute-grid-container">
+        ${validAttributes.map(attr => `
+            <div class="attribute-card" data-attribute="${attr}">
+                <img src="systems/mosh/images/icons/ui/attributes/${attr}.png" alt="${attr}">
+                <h3>${formattedValue} ${attr}</h3>
+            </div>
+        `).join("")}
+    </div>`;
+
+    // Render the dialog as a Promise
+    return new Promise((resolve, reject) => {
+        const dlg = new Dialog({
+            title: "Select an Attribute",
+            content,
+            buttons: {},
+            close: () => resolve(null),
+            render: (html) => {
+                const dialogElement = html.closest('.app');
+                dialogElement.css({ width: `${dialogWidth}px`, maxWidth: '95vw', margin: '0 auto' });
+    
+                // Handle attribute selection
+                html.find('.attribute-card').on('click', async function() {
+                    const selectedAttr = $(this).data('attribute');
+                    const stat = actor.system.stats[selectedAttr];
+    
+                    if (!stat || typeof stat.value !== 'number') {
+                        ui.notifications.error(`Invalid attribute selected: ${selectedAttr}`);
+                        reject(`Invalid attribute selected: ${selectedAttr}`);
+                        return;
+                    }
+    
+                    // Update the actor's attribute
+                    const newValue = stat.value + value;
+                    await actor.update({ [`system.stats.${selectedAttr}.value`]: newValue });
+                    ui.notifications.info(`${selectedAttr.toUpperCase()} increased by ${value} to ${newValue}.`);
+                    console.log(`Updated ${selectedAttr}:`, newValue);
+    
+                    // Resolve the Promise and close the dialog
+                    resolve(selectedAttr);
+                    dlg.close();
+                });
+            }
+        }).render(true);
+    });
+
+}
+
+// 🟩🟩🟩🟩🟩 Skill Tree
+async function skillTree(actor, selectedClass) {
+    // Load all skills, prioritizing world items
+    const compendiumSkills = await game.packs.get('fvtt_mosh_1e_psg.items_skills_1e').getDocuments();
+    const worldSkills = game.items.filter(item => item.type === 'skill');
+    const allSkills = { trained: [], expert: [], master: [] };
+
+    for (const skill of [...worldSkills, ...compendiumSkills]) {
+        const rank = skill.system.rank.toLowerCase();
+        if (allSkills[rank]) allSkills[rank].push(skill);
+    }
+
+    // Extract granted skills from the class
+    const grantedSkills = new Set(selectedClass.system.base_adjustment.skills_granted.map(id => id.split('.').pop()));
+
+    // Fetch and flatten choose_skill_or options
+    const chooseSkillOr = [];
+    for (const skillOption of selectedClass.system.selected_adjustment.choose_skill_or.flat()) {
+        const option = {
+            name: skillOption.name || "Unnamed Option"
+        };
+    
+        const trained = (skillOption.trained || 0) + (skillOption.masterFullSet || 0) + (skillOption.expertFullSet || 0);
+        const expert  = (skillOption.expert  || 0) + (skillOption.masterFullSet || 0) + (skillOption.expertFullSet || 0);
+        const master  = (skillOption.master  || 0) + (skillOption.masterFullSet || 0);
+    
+        if (trained > 0) option.trained = trained;
+        if (expert  > 0) option.expert  = expert;
+        if (master  > 0) option.master  = master;
+    
+        chooseSkillOr.push(option);
+    }
+
+    // Initialize skill points
+    const masterFullSet = selectedClass.system.selected_adjustment.choose_skill_and.master_full_set || 0;
+    const expertFullSet = selectedClass.system.selected_adjustment.choose_skill_and.expert_full_set || 0;
+    const baseSkillPoints = {
+        trained: ( selectedClass.system.selected_adjustment.choose_skill_and.trained || 0 ) + masterFullSet + expertFullSet,
+        expert: ( selectedClass.system.selected_adjustment.choose_skill_and.expert || 0 ) + masterFullSet + expertFullSet,
+        master: ( selectedClass.system.selected_adjustment.choose_skill_and.master || 0 ) + masterFullSet
+    };
+    const skillPoints = {
+        trained: baseSkillPoints.trained,
+        expert: baseSkillPoints.expert,
+        master: baseSkillPoints.master
+    };
+
+    // Build the dialog content
+    let content = `
+    <style>
+        .choose-skill-or-container {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .skill-option {
+            padding: 10px;
+            border: 2px solid #333;
+            border-radius: 6px;
+            background: #1a1a1a;
+            color: #ccc;
+            border-radius: 8px;
+            cursor: pointer;
+            flex: 1;
+            text-align: center;
+            transition: background-color 0.3s, border-color 0.3s;
+        }
+        .skill-option.selected {
+            background: #2f1f18;
+            border-color: #f50;
+            color: #f50;
+        }
+        .skill-container { 
+            display: flex; 
+            gap: 20px; 
+            padding: 16px; 
+        }
+        .skill-column {
+            flex: 1;
+            padding: 0 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .skill-card {
+            pointer-events: auto;
+            min-height: 32px;
+            padding: 4px 6px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 7px;
+            border: 2px solid #333;
+            border-radius: 6px;
+            background: #1a1a1a;
+            color: #ccc;
+            transition: border 0.2s, background 0.2s, color 0.2s;
+            width: 210px;
+            text-align: left;
+            min-height: 34px;
+            cursor: pointer;
+        }
+        .skill-card.selected { 
+            background: #2f1f18 !important;
+            border-color: #f50 !important;
+            color: #f50 !important;
+        }
+        .skill-card.default-skill {
+            background-color: #2f1f18 !important;
+            border-style: dotted;
+            cursor: default !important;
+            pointer-events: none !important;
+        }
+        .skill-card.locked {
+            background-color: #555 !important;
+            cursor: not-allowed !important;
+            pointer-events: none !important;
+            opacity: 0.5;
+        }
+    </style>
+
+    <div class="choose-skill-or-container">
+        ${chooseSkillOr.map((option, index) => `
+            <div class="skill-option" data-option-index="${index}">
+                <h4>${option.name}</h4>
+                <p>${Object.entries(option).filter(([key]) => key !== 'name').map(([key, value]) => `${key}: ${value}`).join('')}</p>
+            </div>
+        `).join('')}
+    </div>
+    <div class="skill-container">
+        <div class="skill-column">
+            <h3>Trained [ <span id="trained-points">${skillPoints.trained}</span> ]</h3>
+            ${allSkills.trained.map(skill => `
+                <div class="skill-card ${grantedSkills.has(skill.id) ? 'default-skill selected' : ''}" data-skill-id="${skill.id}" data-uuid="${skill.uuid}" data-rank="trained">
+                    <img src="${skill.img}" alt="${skill.name}" style="width: 32px; height: 32px;" /><br>
+                    ${skill.name}
+                </div>`).join('')}
+        </div>
+        <div class="skill-column">
+            <h3>Expert [ <span id="expert-points">${skillPoints.expert}</span> ]</h3>
+            ${allSkills.expert.map(skill => `
+                <div class="skill-card locked" data-skill-id="${skill.id}"  data-uuid="${skill.uuid}"
+data-rank="expert">
+                    <img src="${skill.img}" alt="${skill.name}" style="width: 32px; height: 32px;" /><br>
+                    ${skill.name}
+                </div>`).join('')}
+        </div>
+        <div class="skill-column">
+            <h3>Master [ <span id="master-points">${skillPoints.master}</span> ]</h3>
+            ${allSkills.master.map(skill => `
+                <div class="skill-card locked" data-skill-id="${skill.id}" data-uuid="${skill.uuid}" data-rank="master">
+                    <img src="${skill.img}" alt="${skill.name}" style="width: 32px; height: 32px;" /><br>
+                    ${skill.name}
+                </div>`).join('')}
+        </div>
+    </div>`;
+
+    // Render the dialog
+    return new Promise(resolve => {
+        let wasConfirmed = false;
+
+        const dlg = new Dialog({
+            title: "Skill Tree",
+            content,
+            buttons: {
+                confirm: {
+                    label: "Confirm",
+                    callback: (html) => {
+                        const selectedUUIDs = $('.selected[data-uuid]')
+                            .toArray()
+                            .map(el => el.dataset.uuid);
+                        
+                        resolve(selectedUUIDs);
+                    }
+                }
+            },
+            close: () => resolve(null),
+            render: (html) => {
+                // Set the dialog width
+                html.closest('.dialog').css({
+                    width: '1200px',
+                    maxWidth: 'none'
+                });
+
+                // Exclusive selection for choose_skill_or options
+                html.find('.skill-option').on('click', function () {
+                    // Deselect all options
+                    html.find('.skill-option').removeClass('selected');
+                
+                    // Select the clicked option
+                    $(this).addClass('selected');
+                
+                    // Get the selected option index
+                    const optionIndex = $(this).data('option-index');
+                    const selectedOption = chooseSkillOr[optionIndex];
+
+                    // Reset the form and apply the skill bonuses
+                    resetFormWithSkillOr(selectedOption);
+                });
+
+                // Skill selection handling
+                const updateSkillAvailability = () => {
+                    const selectedSkills = new Set(
+                        html.find('.skill-card.selected').map((_, el) => $(el).data('skill-id')).get()
+                    );
+
+                    // Lock or unlock expert and master skills based on prerequisites
+                    html.find('.skill-card').not('.default-skill').each(function () {
+                        const skillId = $(this).data('skill-id');
+                        const rank = $(this).data('rank');
+                        if (rank === 'trained') return;
+
+                        const skill = allSkills[rank].find(s => s.id === skillId);
+                        const prerequisites = skill.system.prerequisite_ids || [];
+                        const hasPrerequisite = prerequisites.some(prereq => selectedSkills.has(prereq.split('.').pop()));
+
+                        if (hasPrerequisite) {
+                            $(this).removeClass('locked');
+                        } else {
+                            $(this).addClass('locked').removeClass('selected');
+                        }
+                    });
+                };
+
+                //Initialize the Skill Tree
+                const initializeSkillTree = () => {
+                    // Reset only non-default skills
+                    html.find('.skill-card').not('.default-skill').removeClass('selected');
+                
+                    // Reset skill points to base
+                    skillPoints.trained = baseSkillPoints.trained;
+                    skillPoints.expert = baseSkillPoints.expert;
+                    skillPoints.master = baseSkillPoints.master;
+                
+                    // Update points display
+                    html.find('#trained-points').text(skillPoints.trained);
+                    html.find('#expert-points').text(skillPoints.expert);
+                    html.find('#master-points').text(skillPoints.master);
+                
+                    // Re-lock skills (this assumes prerequisites will be re-evaluated)
+                    updateSkillAvailability();
+                };
+
+                 // Function to reset the form and apply choose_skill_or bonuses
+                const resetFormWithSkillOr = (selectedOption) => {
+                    initializeSkillTree(); // Reset to base state
+                
+                    // Apply bonuses from the selected option
+                    for (const [rank, value] of Object.entries(selectedOption)) {
+                        if (["trained", "expert", "master"].includes(rank)) {
+                            skillPoints[rank] += value;
+                        }
+                    }
+                
+                    // Update points display again
+                    html.find('#trained-points').text(skillPoints.trained);
+                    html.find('#expert-points').text(skillPoints.expert);
+                    html.find('#master-points').text(skillPoints.master);
+                
+                    updateSkillAvailability();
+                };
+
+                // Initial unlock check
+                updateSkillAvailability();
+
+                // Skill selection handling
+                html.find('.skill-card').not('.default-skill').on('click', function () {
+
+                    // Toggle selection
+                    const rank = $(this).data('rank');
+                    const skillId = $(this).data('skill-id');
+                    
+                    // Prevent deselection if this skill is the only remaining prerequisite for a selected dependent skill
+                    if ($(this).hasClass('selected')) {
+                        const dependents = [...allSkills.expert, ...allSkills.master].filter(skill =>
+                            (skill.system.prerequisite_ids || []).some(prereq => prereq.split('.').pop() === skillId)
+                        );
+                    
+                        for (const dependent of dependents) {
+                            const prerequisites = dependent.system.prerequisite_ids || [];
+                            const selectedPrereqs = prerequisites.filter(prereq => html.find(`[data-skill-id="${prereq.split('.').pop()}"]`).hasClass('selected'));
+                    
+                            // If this is the only remaining prerequisite for a selected skill, block the deselection
+                            const dependentElement = html.find(`[data-skill-id="${dependent.id}"]`);
+                            if (dependentElement.hasClass('selected') && selectedPrereqs.length === 1) {
+                                ui.notifications.warn(`${dependent.name} requires at least one prerequisite.`);
+                                return;
+                            }
+                        }
+                    
+                        // Deselect the skill
+                        $(this).removeClass('selected');
+                        skillPoints[rank] += 1;
+                    } else {
+                        // Selecting the skill, reduce the skill point if available
+                        if (skillPoints[rank] > 0) {
+                            $(this).addClass('selected');
+                            skillPoints[rank] -= 1;
+                        } else {
+                            ui.notifications.warn(`No more ${rank} skill points available.`);
+                            return;
+                        }
+                    }
+
+                    // Update the column headers
+                    html.find('#trained-points').text(skillPoints.trained);
+                    html.find('#expert-points').text(skillPoints.expert);
+                    html.find('#master-points').text(skillPoints.master);
+
+                    // Update availability
+                    updateSkillAvailability();
+                });
+
+                initializeSkillTree();
+            }
+        });
+        dlg.render(true);
+    });
+}
+
+// 🟥🟥🟥🟥🟥 MAIN MACRO
+(async () => {
+
+    // get the character
+    const actor = game.user.character;
+    if (!actor) return ui.notifications.error("No default character assigned.");
+
+    // 🔴 Confirmation: warn user about overwriting the specific character
+    const confirm = await new Promise((resolve) => {
+        new Dialog({
+            title: `⚠️ Overwrite "${actor.name}"?`,
+            content: `
+                <div style="color: #ff4444; font-size: 1.2em; font-weight: bold; padding: 1em; text-align: center; border: 2px solid #ff4444; border-radius: 8px;">
+                    This process will <u>permanently overwrite</u> the character <strong>"${actor.name}"</strong>.<br><br>
+                    All existing items, stats, class, and skills will be erased and rebuilt from scratch.
+                </div>
+            `,
+            buttons: {
+                confirm: {
+                    label: "Yes, Overwrite",
+                    callback: () => resolve(true)
+                },
+                cancel: {
+                    label: "Cancel",
+                    callback: () => resolve(false)
+                }
+            },
+            default: "cancel",
+            close: () => resolve(false)
+        }).render(true);
+    });
+    
+    if (!confirm) return ui.notifications.warn("Character creation canceled.");
+
+
+    // some constants we need
+    const speaker = ChatMessage.getSpeaker({ actor });
+    const attributes = ["strength", "speed", "intellect", "combat"];
+    const saves = ["sanity", "fear", "body"];
+
+    // Clean slate: wipe all items
+    await actor.deleteEmbeddedDocuments("Item", actor.items.map(i => i.id));
+
+    // Roll helper
+    const rollValue = async (formula) => {
+        const roll = new Roll(formula);
+        await roll.evaluate();
+        return roll.total;
+    };
+
+    // Roll base stats and saves
+    const rolledAttributes = Object.fromEntries(
+        await Promise.all(attributes.map(async attr => [attr, await rollValue("2d10 + 25")]))
+    );
+    const rolledSaves = Object.fromEntries(
+        await Promise.all(saves.map(async save => [save, await rollValue("2d10 + 10")]))
+    );
+
+  // Apply base stats, saves, and wounds; reset stress
+    await actor.update({
+        system: {
+            stats: {
+                ...Object.fromEntries(attributes.map(attr => [attr, { value: rolledAttributes[attr] }])),
+                ...Object.fromEntries(saves.map(save => [save, { value: rolledSaves[save] }]))
+            },
+            other: {
+                stressdesc: { value: ""},
+                stress: { value: 2, min: 2 }
+            },
+            hits: { value: 0, max: 2 },
+            health: { value: "", max: "" },
+            class: { value: "", uuid: "" },
+            credits: { value: "" }
+        }
+    });
+
+    // Chat output for rolled attributes and saves
+    ChatMessage.create({
+        speaker,
+        content: `<strong>${actor.name} Rolls:</strong><br><br>
+            <u><b>Attributes</b></u><br>
+            ${attributes.map(a => `${a[0].toUpperCase() + a.slice(1)}: ${rolledAttributes[a]}`).join("<br>")}<br><br>
+            <u><b>Saves</b></u><br>
+            ${saves.map(s => `${s[0].toUpperCase() + s.slice(1)}: ${rolledSaves[s]}`).join("<br>")}`
+    });
+
+    // 🟧🟧🟧 Class Selection
+    let selectedClass = null;
+    while (!selectedClass) {
+        // run the sub-macro for the GUI
+        selectedClass = await selectClass(actor);
+    
+        // Retry or Cancel fallback
+        if (selectedClass === null || selectedClass === undefined) {
+            const retry = await new Promise((resolve) => {
+                new Dialog({
+                    title: "No Class Selected",
+                    content: "You closed the class selection. Would you like to try again or cancel character creation?",
+                    buttons: {
+                        retry: {
+                            label: "Retry",
+                            callback: () => resolve(true)
+                        },
+                        cancel: {
+                            label: "Cancel",
+                            callback: () => resolve(false)
+                        }
+                    },
+                    default: "retry"
+                }).render(true);
+            });
+            // notification for the Cancel
+            if (!retry) return ui.notifications.warn("Character creation canceled.");
+        }
+    }
+
+    // Load the selected class
+    const selectedClassItem = await fromUuid(selectedClass);
+    if (!selectedClassItem) return ui.notifications.error("Invalid class selected.");
+    const classData = selectedClassItem.system;
+
+    // 🟦🟦🟦 Attribute Choices
+    // 🟦🟦🟦 Attribute Choices
+    const attributeChoices = classData.selected_adjustment?.choose_stat || [];
+    for (const choice of attributeChoices) {
+        const { modification, stats } = choice;
+    
+        let result = null;
+        while (!result) {
+            result = await attributeChoice(actor, modification, stats);
+    
+            if (!result) {
+                const retry = await new Promise((resolve) => {
+                    new Dialog({
+                        title: "No Attribute Selected",
+                        content: "You closed the attribute selection. Would you like to try again or cancel character creation?",
+                        buttons: {
+                            retry: {
+                                label: "Retry",
+                                callback: () => resolve(true)
+                            },
+                            cancel: {
+                                label: "Cancel",
+                                callback: () => resolve(false)
+                            }
+                        },
+                        default: "retry"
+                    }).render(true);
+                });
+    
+                if (!retry) return ui.notifications.warn("Character creation canceled.");
+            }
+        }
+    }
+
+    // Run the 🟩🟩🟩 Skill Tree
+    let selectedSkills = null;
+    while (!selectedSkills) {
+        // Skill Tree function
+        selectedSkills = await skillTree(actor, selectedClassItem);
+    
+        // Retry or Cancel fallback
+        if (selectedSkills === null || selectedSkills === undefined) {
+            const retry = await new Promise((resolve) => {
+                new Dialog({
+                    title: "No Skills Selected",
+                    content: "You closed the skill tree. Would you like to try again or cancel character creation?",
+                        buttons: {
+                            retry: {
+                                label: "Retry",
+                                callback: () => resolve(true)
+                            },
+                            cancel: {
+                                label: "Cancel",
+                                callback: () => resolve(false)
+                            }
+                        },
+                    default: "retry"
+                }).render(true);
+            });
+            // notification for the Cancel
+            if (!retry) return ui.notifications.warn("Character creation canceled.");
+        }
+    }
+  
+    // Put skills on sheet
+    const skillItems = [];
+
+    for (const uuid of selectedSkills) {
+        try {
+            const item = await fromUuid(uuid);
+            if (!item || item.type !== "skill") {
+                console.warn(`Skipped non-skill or invalid item: ${uuid}`);
+                continue;
+            }
+    
+           const itemData = item.toObject();
+            // Prevent potential UUID/ID conflicts
+            delete itemData._id;
+    
+            skillItems.push(itemData);
+        } catch (err) {
+            console.error(`Failed to load skill from UUID: ${uuid}`, err);
+        }
+    }
+
+    if (skillItems.length > 0) {
+        await actor.createEmbeddedDocuments("Item", skillItems);
+        ui.notifications.info(`Added ${skillItems.length} skill(s) to ${actor.name}.`);
+    } else {
+        ui.notifications.warn("No valid skills were added.");
+    }
+
+
+    // Roll and assign loadout + patches + trinkets
+    // some constants we need for that
+    const DEFAULT_IMAGES = {
+        Loadout: "icons/svg/box.svg",
+        Patches: "icons/svg/patch.svg",
+        Trinkets: "icons/svg/necklace.svg"
+    };
+    const tableUUIDs = [classData.roll_tables?.loadout, classData.roll_tables?.patch, classData.roll_tables?.trinket].filter(Boolean);
+    const allLoot = { Weapons: [], Armor: [], Items: [] };
+    const itemsToCreate = [];
+
+    // go through all the rolltables
+    for (const uuid of tableUUIDs) {
+        const table = await fromUuid(uuid);
+        if (!table) continue;
+        const results = (await table.roll()).results;
+    
+        // go through all the results
+        for (const result of results) {
+            const ref = result.documentCollection;
+            const docId = result.documentId;
+            let fullItem = null;
+    
+            // Correct UUID formatting for compendium items
+            if (ref && docId) {
+                const itemUuid = `Compendium.${ref}.${docId}`;
+                try {
+                    fullItem = await fromUuid(itemUuid);
+                } catch (error) {
+                    console.warn(`Failed to load item from UUID: ${itemUuid}`, error);
+                }
+            }
+    
+            // If a full item was found, add it to the correct category
+            if (fullItem) {
+                const itemData = fullItem.toObject(false);
+                itemsToCreate.push(itemData);
+                if (itemData.type === "weapon") allLoot.Weapons.push(itemData.name);
+                else if (itemData.type === "armor") allLoot.Armor.push(itemData.name);
+                else allLoot.Items.push(itemData.name);
+                continue;
+            }
+    
+            // Filter out UUIDs and clean up the text for generic items if no full item was found
+            let cleanText = result.text?.replace(/<br\s*\/?>/gi, " ").replace(/@UUID\[[^\]]+\]/g, "").trim();
+            if (cleanText) {
+                itemsToCreate.push({ name: cleanText, type: "item", img: DEFAULT_IMAGES.Loadout, system: {}, effects: [], flags: {} });
+                allLoot.Items.push(cleanText);
+            }
+        }
+    }
+
+    // put all the items on the sheet
+    if (itemsToCreate.length > 0) await actor.createEmbeddedDocuments("Item", itemsToCreate);
+
+    // Roll and assign starting credits
+    const creditRoll = new Roll("2d10 * 10");
+    await creditRoll.evaluate();
+    const startingCredits = creditRoll.total;
+    await actor.update({ system: { credits: { value: startingCredits } } });
+
+    // Output categorized loot and credits
+    let lootHtml = `<strong>${actor.name} receives:</strong><br>`;
+    for (const [category, items] of Object.entries(allLoot)) {
+       if (items.length > 0) lootHtml += `<u>${category}</u><ul>${items.map(i => `<li>${i}</li>`).join("")}</ul>`;
+    }
+    lootHtml += `<br><strong>Starting Credits:</strong> ${startingCredits} cr`;
+    ChatMessage.create({ speaker, content: lootHtml });
+})();
